@@ -1,0 +1,25 @@
+# Ignore build output
+bin/
+obj/
+
+# Ignore user-specific files
+*.user
+*.suo
+.vscode/
+
+# Ignore database files (local dev)
+osu.db
+osu.db-shm
+osu.db-wal
+*.db
+*.sqlite
+
+# Ignore uploaded files (avatars should be stored in cloud storage like AWS S3 or R2 for production, but Render disk is ephemeral anyway)
+wwwroot/avatars/
+
+# Ignore logs
+*.log
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
