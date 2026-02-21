@@ -30,7 +30,7 @@ RUN apt-get update && \
     dpkg -i packages-microsoft-prod.deb && \
     rm packages-microsoft-prod.deb && \
     apt-get update && \
-    apt-get install -y aspnetcore-runtime-8.0 && \
+    apt-get install -y aspnetcore-runtime-8.0 dotnet-runtime-8.0 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -41,4 +41,5 @@ COPY --from=build /app/out .
 ENV ASPNETCORE_URLS=http://+:5000
 EXPOSE 5000
 
-ENTRYPOINT ["dotnet", "OsuPrivateServer.dll"]
+# Use full path to dotnet executable to be safe
+ENTRYPOINT ["/usr/bin/dotnet", "OsuPrivateServer.dll"]
