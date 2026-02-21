@@ -1,0 +1,22 @@
+# Ignore everything
+*
+# But not these files...
+!.gitignore
+!README.md
+
+# ...and not the OsuPrivateServer directory
+!OsuPrivateServer/
+!OsuPrivateServer/**
+
+# Ignore inside OsuPrivateServer (standard ignore rules)
+OsuPrivateServer/bin/
+OsuPrivateServer/obj/
+OsuPrivateServer/.vscode/
+OsuPrivateServer/*.user
+OsuPrivateServer/*.suo
+OsuPrivateServer/osu.db
+OsuPrivateServer/osu.db-shm
+OsuPrivateServer/osu.db-wal
+OsuPrivateServer/*.db
+OsuPrivateServer/*.sqlite
+OsuPrivateServer/*.log
