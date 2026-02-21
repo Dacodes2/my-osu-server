@@ -1,25 +1,43 @@
-# Use the official ASP.NET Core SDK image to build the app
-FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS build
+# Use Ubuntu as the base image to avoid MCR registry issues
+FROM ubuntu:22.04 AS build
 WORKDIR /app
 
-# Copy csproj and restore as distinct layers
+# Install prerequisites
+RUN apt-get update && \
+    apt-get install -y wget ca-certificates && \
+    wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb && \
+    dpkg -i packages-microsoft-prod.deb && \
+    rm packages-microsoft-prod.deb && \
+    apt-get update && \
+    apt-get install -y dotnet-sdk-8.0
+
+# Copy csproj and restore
 COPY *.csproj ./
 RUN dotnet restore
 
-# Copy everything else and build
+# Copy source and build
 COPY . ./
 RUN dotnet publish -c Release -o out
 
-# Build runtime image
-FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine
+# Runtime stage
+FROM ubuntu:22.04
 WORKDIR /app
+
+# Install Runtime dependencies
+RUN apt-get update && \
+    apt-get install -y wget ca-certificates aspnetcore-runtime-8.0 && \
+    wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb && \
+    dpkg -i packages-microsoft-prod.deb && \
+    rm packages-microsoft-prod.deb && \
+    apt-get update && \
+    apt-get install -y aspnetcore-runtime-8.0 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy build artifacts
 COPY --from=build /app/out .
 
-# Install cultures (optional but recommended for .NET on Alpine)
-RUN apk add --no-cache icu-libs
-ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
-
-# Expose the port (Render sets the PORT env var)
+# Configuration
 ENV ASPNETCORE_URLS=http://+:5000
 EXPOSE 5000
 
