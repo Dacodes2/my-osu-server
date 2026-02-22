@@ -206,7 +206,7 @@ app.MapPost("/oauth/token", ([FromForm] string grant_type, [FromForm] string use
         db.Users.Add(user);
         db.SaveChanges();
     }
-    else if (string.IsNullOrEmpty(user.AvatarUrl) || !user.AvatarUrl.StartsWith("http") || user.AvatarUrl.Contains("localhost"))
+    else if (string.IsNullOrEmpty(user.AvatarUrl) || !user.AvatarUrl.StartsWith("http"))
     {
         // Fix missing or incorrect avatar url for existing users
         user.AvatarUrl = $"{websiteUrl}/avatars/{user.Id}";
@@ -619,10 +619,36 @@ app.MapPut("/api/v2/beatmaps/{beatmapId}/solo/scores/{scoreId}", async (int beat
             
             return Results.Ok(new { 
                 id = score.Id,
+                user_id = score.UserId,
+                beatmap_id = score.BeatmapId,
                 total_score = score.TotalScore,
                 accuracy = score.Accuracy,
+                max_combo = score.MaxCombo,
+                rank = score.Rank,
                 pp = score.Pp,
-                rank = score.Rank
+                passed = score.Passed,
+                created_at = score.CreatedAt,
+                statistics = new 
+                {
+                    count_300 = score.Statistics.Count300,
+                    count_100 = score.Statistics.Count100,
+                    count_50 = score.Statistics.Count50,
+                    count_miss = score.Statistics.CountMiss,
+                    count_geki = score.Statistics.CountGeki,
+                    count_katu = score.Statistics.CountKatu
+                },
+                mode_int = score.RulesetId,
+                mods = new string[] { },
+                user = new 
+                {
+                    id = user?.Id ?? 0,
+                    username = user?.Username ?? "Unknown",
+                    country_code = user?.CountryCode ?? "US",
+                    avatar_url = user?.AvatarUrl ?? "",
+                    cover_url = user?.CoverUrl ?? "",
+                    is_active = user?.IsActive ?? true,
+                    is_supporter = user?.IsSupporter ?? true
+                }
             }); 
         }
     }
@@ -651,10 +677,36 @@ app.MapPut("/api/v2/beatmaps/{beatmapId}/solo/scores/{scoreId}", async (int beat
 
     return Results.Ok(new { 
         id = score.Id,
+        user_id = score.UserId,
+        beatmap_id = score.BeatmapId,
         total_score = score.TotalScore,
         accuracy = score.Accuracy,
+        max_combo = score.MaxCombo,
+        rank = score.Rank,
         pp = score.Pp,
-        rank = score.Rank
+        passed = score.Passed,
+        created_at = score.CreatedAt,
+        statistics = new 
+        {
+            count_300 = score.Statistics.Count300,
+            count_100 = score.Statistics.Count100,
+            count_50 = score.Statistics.Count50,
+            count_miss = score.Statistics.CountMiss,
+            count_geki = score.Statistics.CountGeki,
+            count_katu = score.Statistics.CountKatu
+        },
+        mode_int = score.RulesetId,
+        mods = new string[] { },
+        user = new 
+        {
+            id = userFallback?.Id ?? 0,
+            username = userFallback?.Username ?? "Unknown",
+            country_code = userFallback?.CountryCode ?? "US",
+            avatar_url = userFallback?.AvatarUrl ?? "",
+            cover_url = userFallback?.CoverUrl ?? "",
+            is_active = userFallback?.IsActive ?? true,
+            is_supporter = userFallback?.IsSupporter ?? true
+        }
     }); 
 });
 
@@ -1081,6 +1133,18 @@ app.MapGet("/api/v2/chat/channels", () => Results.Ok(new List<object>()));
 app.MapGet("/api/v2/notifications", () => Results.Ok(new { notifications = new List<object>() }));
 
 app.MapGet("/avatars/{id}", (string id, AppDbContext db) => {
+    // Check for local file first (if the URL didn't have an extension)
+    var extensions = new[] { ".jpg", ".jpeg", ".png", ".gif" };
+    var avatarsDir = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "avatars");
+    
+    foreach (var ext in extensions)
+    {
+        if (File.Exists(Path.Combine(avatarsDir, $"{id}{ext}")))
+        {
+            return Results.Redirect($"/avatars/{id}{ext}");
+        }
+    }
+
     if (int.TryParse(id, out int userId)) {
         var user = db.Users.FirstOrDefault(u => u.Id == userId);
         if (user != null) {
