@@ -275,7 +275,7 @@ app.MapGet("/api/v2/users/{id}/{mode}", (string id, string mode, AppDbContext db
 });
 
 // Leaderboards
-app.MapGet("/api/v2/rankings/{mode}/{type}", (string mode, string type, [FromQuery] int page = 1, AppDbContext db) =>
+app.MapGet("/api/v2/rankings/{mode}/{type}", (string mode, string type, AppDbContext db, [FromQuery] int page = 1) =>
 {
     // Ensure page is valid
     if (page < 1) page = 1;
@@ -1057,7 +1057,6 @@ app.MapPost("/api/custom/update_profile", async (HttpRequest request, AppDbConte
     return Results.Ok(user);
 });
 
-app.MapGet("/api/v2/friends", () => Results.Ok(new List<object>()));
 app.MapGet("/api/v2/chat/channels", () => Results.Ok(new List<object>()));
 app.MapGet("/api/v2/notifications", () => Results.Ok(new { notifications = new List<object>() }));
 
