@@ -15,6 +15,8 @@ builder.WebHost.UseUrls($"http://*:{port}");
 // Determine public URL
 string websiteUrl = Environment.GetEnvironmentVariable("WEBSITE_URL") 
                     ?? (builder.Environment.IsDevelopment() ? $"http://localhost:{port}" : "https://my-osu-server.onrender.com");
+var avatarDir = Environment.GetEnvironmentVariable("AVATAR_DIR") 
+                ?? Path.Combine(builder.Environment.ContentRootPath, "wwwroot", "avatars");
 
 
 // Add services to the container.
@@ -25,12 +27,18 @@ builder.Services.AddSwaggerGen();
 var connectionString = Environment.GetEnvironmentVariable("DATABASE_URL");
 if (string.IsNullOrEmpty(connectionString))
 {
-    // Use SQLite for local persistence (creates a file named 'osu.db')
-    // This is better than InMemory because it saves data to a file.
-    // NOTE: On Render Free Tier, this file will still reset on restart (ephemeral filesystem),
-    // but it works perfectly for local testing and persistent hosting elsewhere.
+    var sqlitePath = Environment.GetEnvironmentVariable("SQLITE_PATH");
+    if (string.IsNullOrWhiteSpace(sqlitePath))
+    {
+        sqlitePath = Path.Combine(builder.Environment.ContentRootPath, "Data", "osu.db");
+    }
+    var sqliteDir = Path.GetDirectoryName(sqlitePath);
+    if (!string.IsNullOrWhiteSpace(sqliteDir))
+    {
+        Directory.CreateDirectory(sqliteDir);
+    }
     builder.Services.AddDbContext<AppDbContext>(options =>
-        options.UseSqlite("Data Source=osu.db"));
+        options.UseSqlite($"Data Source={sqlitePath}"));
 }
 else
 {
@@ -114,6 +122,22 @@ app.Use(async (context, next) =>
     await next();
 });
 
+string GetBaseUrl(HttpRequest request)
+{
+    return string.IsNullOrWhiteSpace(request.Host.Value) ? websiteUrl.TrimEnd('/') : $"{request.Scheme}://{request.Host}";
+}
+
+string NormalizeAvatarUrl(string? avatarUrl, int userId, string baseUrl)
+{
+    if (string.IsNullOrWhiteSpace(avatarUrl) || avatarUrl == "/avatars/default")
+        return $"{baseUrl}/avatars/{userId}";
+    if (Uri.TryCreate(avatarUrl, UriKind.Absolute, out var uri))
+        return $"{baseUrl}{uri.PathAndQuery}";
+    if (avatarUrl.StartsWith("/"))
+        return $"{baseUrl}{avatarUrl}";
+    return $"{baseUrl}/{avatarUrl}";
+}
+
 app.MapPost("/api/v2/beatmapsets/{id}/favourites", (int id, [FromForm] string action, AppDbContext db) =>
 {
     // Mock implementation for favouriting beatmaps
@@ -133,9 +157,9 @@ app.MapPost("/users", (HttpRequest request, AppDbContext db) =>
 
     var form = request.Form;
     // The client sends data as user[username], user[user_email], user[password]
-    string user = form["user[username]"];
-    string email = form["user[user_email]"];
-    string password = form["user[password]"];
+    string user = form["user[username]"].ToString();
+    string email = form["user[user_email]"].ToString();
+    string password = form["user[password]"].ToString();
 
     if (string.IsNullOrEmpty(user) || string.IsNullOrEmpty(email) || string.IsNullOrEmpty(password))
     {
@@ -182,8 +206,9 @@ app.MapPost("/users", (HttpRequest request, AppDbContext db) =>
     return Results.Ok(new { });
 });
 
-app.MapPost("/oauth/token", ([FromForm] string grant_type, [FromForm] string username, [FromForm] string password, [FromForm] string client_id, [FromForm] string client_secret, AppDbContext db) =>
+app.MapPost("/oauth/token", (HttpRequest request, [FromForm] string grant_type, [FromForm] string username, [FromForm] string password, [FromForm] string client_id, [FromForm] string client_secret, AppDbContext db) =>
 {
+    var baseUrl = string.IsNullOrWhiteSpace(request.Host.Value) ? websiteUrl.TrimEnd('/') : $"{request.Scheme}://{request.Host}";
     // Auto-register or login
     var user = db.Users.FirstOrDefault(u => u.Username.ToLower() == username.ToLower());
     
@@ -195,7 +220,7 @@ app.MapPost("/oauth/token", ([FromForm] string grant_type, [FromForm] string use
             Id = newId,
             Username = username,
             CountryCode = "US",
-            AvatarUrl = $"{websiteUrl}/avatars/{newId}",
+            AvatarUrl = $"{baseUrl}/avatars/{newId}",
             Statistics = new UserStatistics 
             { 
                 GlobalRank = newId, 
@@ -208,8 +233,7 @@ app.MapPost("/oauth/token", ([FromForm] string grant_type, [FromForm] string use
     }
     else if (string.IsNullOrEmpty(user.AvatarUrl) || !user.AvatarUrl.StartsWith("http"))
     {
-        // Fix missing or incorrect avatar url for existing users
-        user.AvatarUrl = $"{websiteUrl}/avatars/{user.Id}";
+        user.AvatarUrl = $"{baseUrl}/avatars/{user.Id}";
         db.SaveChanges();
     }
 
@@ -233,7 +257,12 @@ app.MapGet("/api/v2/me", (HttpRequest request, AppDbContext db) =>
         if (int.TryParse(userIdString, out int userId))
         {
             var user = db.Users.FirstOrDefault(u => u.Id == userId);
-            if (user != null) return Results.Ok(user);
+            if (user != null)
+            {
+                var baseUrl = GetBaseUrl(request);
+                user.AvatarUrl = NormalizeAvatarUrl(user.AvatarUrl, user.Id, baseUrl);
+                return Results.Ok(user);
+            }
         }
     }
     catch { }
@@ -242,7 +271,7 @@ app.MapGet("/api/v2/me", (HttpRequest request, AppDbContext db) =>
 });
 
 // Generic user profile
-app.MapGet("/api/v2/users/{id}", (string id, AppDbContext db) =>
+app.MapGet("/api/v2/users/{id}", (string id, HttpRequest request, AppDbContext db) =>
 {
     User? user = null;
     if (int.TryParse(id, out int userId))
@@ -255,11 +284,13 @@ app.MapGet("/api/v2/users/{id}", (string id, AppDbContext db) =>
     }
 
     if (user == null) return Results.NotFound();
+    var baseUrl = GetBaseUrl(request);
+    user.AvatarUrl = NormalizeAvatarUrl(user.AvatarUrl, user.Id, baseUrl);
     return Results.Ok(user);
 });
 
 // Full profile with mode (osu)
-app.MapGet("/api/v2/users/{id}/{mode}", (string id, string mode, AppDbContext db) =>
+app.MapGet("/api/v2/users/{id}/{mode}", (string id, string mode, HttpRequest request, AppDbContext db) =>
 {
     User? user = null;
     if (int.TryParse(id, out int userId))
@@ -272,11 +303,13 @@ app.MapGet("/api/v2/users/{id}/{mode}", (string id, string mode, AppDbContext db
     }
 
     if (user == null) return Results.NotFound();
+    var baseUrl = GetBaseUrl(request);
+    user.AvatarUrl = NormalizeAvatarUrl(user.AvatarUrl, user.Id, baseUrl);
     return Results.Ok(user);
 });
 
 // Leaderboards
-app.MapGet("/api/v2/rankings/{mode}/{type}", (string mode, string type, AppDbContext db, [FromQuery] int page = 1) =>
+app.MapGet("/api/v2/rankings/{mode}/{type}", (string mode, string type, HttpRequest request, AppDbContext db, [FromQuery] int page = 1) =>
 {
     // Ensure page is valid
     if (page < 1) page = 1;
@@ -300,6 +333,7 @@ app.MapGet("/api/v2/rankings/{mode}/{type}", (string mode, string type, AppDbCon
     db.SaveChanges();
 
     var pagedUsers = users.Skip((page - 1) * 50).Take(50).ToList();
+    var baseUrl = GetBaseUrl(request);
 
     // Map to client expected structure (UserStatistics)
     var mappedRanking = pagedUsers.Select(u => new
@@ -309,7 +343,7 @@ app.MapGet("/api/v2/rankings/{mode}/{type}", (string mode, string type, AppDbCon
             id = u.Id,
             username = u.Username,
             country_code = u.CountryCode,
-            avatar_url = u.AvatarUrl,
+            avatar_url = NormalizeAvatarUrl(u.AvatarUrl, u.Id, baseUrl),
             cover_url = u.CoverUrl,
             is_active = u.IsActive,
             is_supporter = u.IsSupporter
@@ -539,7 +573,9 @@ app.MapPut("/api/v2/beatmaps/{beatmapId}/solo/scores/{scoreId}", async (int beat
     var score = db.Scores.FirstOrDefault(s => s.Id == scoreId);
     if (score == null) return Results.NotFound();
     if (score.UserId != userId) return Results.Forbid();
+    var baseUrl = GetBaseUrl(request);
 
+    var hasAr10 = false;
     try 
     {
         using var reader = new StreamReader(request.Body);
@@ -567,6 +603,23 @@ app.MapPut("/api/v2/beatmaps/{beatmapId}/solo/scores/{scoreId}", async (int beat
                 score.Statistics.CountKatu = stats["count_katu"]?.GetValue<int>() ?? 0;
             }
 
+            if (json["mods"] is JsonArray modsArray)
+            {
+                foreach (var modNode in modsArray)
+                {
+                    if (modNode == null) continue;
+                    var modText = modNode is JsonValue value
+                        ? value.GetValue<string>()
+                        : modNode["acronym"]?.GetValue<string>();
+
+                    if (string.Equals(modText, "AR10", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasAr10 = true;
+                        break;
+                    }
+                }
+            }
+
             // Calculate PP (Simple approximation)
             // Real PP calculation is complex, so we'll make a fun estimate
             // Base PP on accuracy and combo scaling
@@ -584,6 +637,7 @@ app.MapPut("/api/v2/beatmaps/{beatmapId}/solo/scores/{scoreId}", async (int beat
             double comboMult = Math.Log10(score.MaxCombo + 10) * 10;
             
             score.Pp = (ppBase * acc) + comboMult;
+            if (hasAr10) score.Pp *= 1.2;
 
             // Update User Stats
             var user = db.Users.Include(u => u.Statistics).FirstOrDefault(u => u.Id == userId);
@@ -644,7 +698,7 @@ app.MapPut("/api/v2/beatmaps/{beatmapId}/solo/scores/{scoreId}", async (int beat
                     id = user?.Id ?? 0,
                     username = user?.Username ?? "Unknown",
                     country_code = user?.CountryCode ?? "US",
-                    avatar_url = user?.AvatarUrl ?? "",
+                    avatar_url = user != null ? NormalizeAvatarUrl(user.AvatarUrl, user.Id, baseUrl) : "",
                     cover_url = user?.CoverUrl ?? "",
                     is_active = user?.IsActive ?? true,
                     is_supporter = user?.IsSupporter ?? true
@@ -702,7 +756,7 @@ app.MapPut("/api/v2/beatmaps/{beatmapId}/solo/scores/{scoreId}", async (int beat
             id = userFallback?.Id ?? 0,
             username = userFallback?.Username ?? "Unknown",
             country_code = userFallback?.CountryCode ?? "US",
-            avatar_url = userFallback?.AvatarUrl ?? "",
+            avatar_url = userFallback != null ? NormalizeAvatarUrl(userFallback.AvatarUrl, userFallback.Id, baseUrl) : "",
             cover_url = userFallback?.CoverUrl ?? "",
             is_active = userFallback?.IsActive ?? true,
             is_supporter = userFallback?.IsSupporter ?? true
@@ -711,7 +765,7 @@ app.MapPut("/api/v2/beatmaps/{beatmapId}/solo/scores/{scoreId}", async (int beat
 });
 
 // Beatmap Leaderboard
-app.MapGet("/api/v2/beatmaps/{beatmapId}/scores", (int beatmapId, AppDbContext db) =>
+app.MapGet("/api/v2/beatmaps/{beatmapId}/scores", (int beatmapId, HttpRequest request, AppDbContext db) =>
 {
     var scores = db.Scores
         .Where(s => s.BeatmapId == beatmapId && s.Passed)
@@ -720,10 +774,13 @@ app.MapGet("/api/v2/beatmaps/{beatmapId}/scores", (int beatmapId, AppDbContext d
         .ToList();
 
     var resultScores = new List<object>();
+    var baseUrl = GetBaseUrl(request);
 
     foreach (var score in scores)
     {
         var user = db.Users.FirstOrDefault(u => u.Id == score.UserId);
+        if (user == null) continue;
+        var scoreUser = user;
         if (user != null)
         {
             resultScores.Add(new 
@@ -754,7 +811,7 @@ app.MapGet("/api/v2/beatmaps/{beatmapId}/scores", (int beatmapId, AppDbContext d
                     id = user.Id,
                     username = user.Username,
                     country_code = user.CountryCode,
-                    avatar_url = user.AvatarUrl,
+                avatar_url = NormalizeAvatarUrl(user.AvatarUrl, user.Id, baseUrl),
                     cover_url = user.CoverUrl,
                     is_active = user.IsActive,
                     is_supporter = user.IsSupporter
@@ -767,7 +824,7 @@ app.MapGet("/api/v2/beatmaps/{beatmapId}/scores", (int beatmapId, AppDbContext d
 });
 
 // User Profile Scores (Best, Recent, Firsts)
-app.MapGet("/api/v2/users/{id}/scores/{type}", async (string id, string type, [FromQuery] int limit, [FromQuery] int offset, AppDbContext db) =>
+app.MapGet("/api/v2/users/{id}/scores/{type}", async (string id, string type, [FromQuery] int limit, [FromQuery] int offset, HttpRequest request, AppDbContext db) =>
 {
     int userId = 0;
     if (!int.TryParse(id, out userId))
@@ -795,9 +852,12 @@ app.MapGet("/api/v2/users/{id}/scores/{type}", async (string id, string type, [F
 
     using var client = new HttpClient();
 
+    var baseUrl = GetBaseUrl(request);
     foreach (var score in scores)
     {
         var user = db.Users.FirstOrDefault(u => u.Id == score.UserId);
+        if (user == null) continue;
+        var scoreUser = user;
         
         // Fetch beatmap info from Nerinyan to populate the card
         object? beatmapInfo = null;
@@ -853,13 +913,13 @@ app.MapGet("/api/v2/users/{id}/scores/{type}", async (string id, string type, [F
             mods = new string[] { },
             user = new 
             {
-                id = user.Id,
-                username = user.Username,
-                country_code = user.CountryCode,
-                avatar_url = user.AvatarUrl,
-                cover_url = user.CoverUrl,
-                is_active = user.IsActive,
-                is_supporter = user.IsSupporter
+                id = scoreUser.Id,
+                username = scoreUser.Username,
+                country_code = scoreUser.CountryCode,
+                avatar_url = NormalizeAvatarUrl(scoreUser.AvatarUrl, scoreUser.Id, baseUrl),
+                cover_url = scoreUser.CoverUrl,
+                is_active = scoreUser.IsActive,
+                is_supporter = scoreUser.IsSupporter
             },
             beatmap = beatmapInfo,
             beatmapset = beatmapsetInfo,
@@ -898,18 +958,17 @@ app.MapPost("/api/v2/users/{id}/avatar", async (int id, HttpRequest request, App
         ext = ".jpg"; // Default to jpg
 
     // Save file
-    var avatarsDir = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "avatars");
-    Directory.CreateDirectory(avatarsDir);
+    Directory.CreateDirectory(avatarDir);
     
     // Delete old avatars
-    var oldFiles = Directory.GetFiles(avatarsDir, $"{id}.*");
+    var oldFiles = Directory.GetFiles(avatarDir, $"{id}.*");
     foreach (var oldFile in oldFiles)
     {
         try { File.Delete(oldFile); } catch {}
     }
     
     var fileName = $"{id}{ext}";
-    var filePath = Path.Combine(avatarsDir, fileName);
+    var filePath = Path.Combine(avatarDir, fileName);
     
     using (var stream = new FileStream(filePath, FileMode.Create))
     {
@@ -920,12 +979,7 @@ app.MapPost("/api/v2/users/{id}/avatar", async (int id, HttpRequest request, App
     var user = db.Users.FirstOrDefault(u => u.Id == id);
     if (user != null)
     {
-        // Use a relative path so it works in both dev (localhost) and prod (container)
-        // Or construct the full URL based on the incoming request if absolute is needed
-        // For now, let's stick to the websiteUrl environment variable which should be set correctly
-        
-        // Ensure websiteUrl doesn't have a trailing slash if we're adding one
-        var baseUrl = websiteUrl.TrimEnd('/');
+        var baseUrl = GetBaseUrl(request);
         user.AvatarUrl = $"{baseUrl}/avatars/{fileName}?t={DateTime.UtcNow.Ticks}";
         db.SaveChanges();
     }
@@ -933,30 +987,70 @@ app.MapPost("/api/v2/users/{id}/avatar", async (int id, HttpRequest request, App
     return Results.Ok(new { avatar_url = user?.AvatarUrl });
 });
 
-// Friends & Users Endpoints
-app.MapGet("/api/v2/users", (string? q, AppDbContext db) =>
+app.MapGet("/api/v2/search", ([FromQuery] string? query, [FromQuery] string? q, [FromQuery] string? mode, [FromQuery] int limit, [FromQuery] int offset, HttpRequest request, AppDbContext db) =>
 {
-    var query = db.Users.AsQueryable();
+    var term = !string.IsNullOrWhiteSpace(query) ? query : q;
+    if (limit <= 0) limit = 20;
+    if (limit > 100) limit = 100;
+    if (offset < 0) offset = 0;
+
+    var usersQuery = db.Users.Include(u => u.Statistics).AsQueryable();
+    if (!string.IsNullOrWhiteSpace(term))
+        usersQuery = usersQuery.Where(u => u.Username.ToLower().Contains(term.ToLower()));
+
+    var total = usersQuery.Count();
+    var baseUrl = GetBaseUrl(request);
+    var users = usersQuery
+        .Where(u => u.Statistics != null)
+        .OrderByDescending(u => u.Statistics.Pp)
+        .Skip(offset)
+        .Take(limit)
+        .ToList();
+
+    var mapped = users.Select(u => new {
+        id = u.Id,
+        username = u.Username,
+        avatar_url = NormalizeAvatarUrl(u.AvatarUrl, u.Id, baseUrl),
+        country_code = u.CountryCode,
+        cover_url = u.CoverUrl,
+        is_supporter = u.IsSupporter
+    }).ToList();
+
+    return Results.Ok(new { users = new { data = mapped, total = total } });
+});
+
+// Friends & Users Endpoints
+app.MapGet("/api/v2/users", ([FromQuery] string? q, [FromQuery] int limit, [FromQuery] int offset, HttpRequest request, AppDbContext db) =>
+{
+    if (limit <= 0) limit = 20;
+    if (limit > 100) limit = 100;
+    if (offset < 0) offset = 0;
+
+    var query = db.Users.Include(u => u.Statistics).AsQueryable();
 
     if (!string.IsNullOrWhiteSpace(q))
     {
         query = query.Where(u => u.Username.ToLower().Contains(q.ToLower()));
     }
 
+    var baseUrl = GetBaseUrl(request);
     var users = query
-        .OrderByDescending(u => u.Statistics.Pp) // Show top players by default
-        .Take(20)
-        .Select(u => new {
-            id = u.Id,
-            username = u.Username,
-            avatar_url = u.AvatarUrl,
-            country_code = u.CountryCode,
-            cover_url = u.CoverUrl,
-            is_supporter = u.IsSupporter
-        })
+        .Where(u => u.Statistics != null)
+        .OrderByDescending(u => u.Statistics.Pp) 
+        .Skip(offset)
+        .Take(limit)
         .ToList();
+
+    var mapped = users.Select(u => new {
+        id = u.Id,
+        username = u.Username,
+        avatar_url = NormalizeAvatarUrl(u.AvatarUrl, u.Id, baseUrl),
+        country_code = u.CountryCode,
+        cover_url = u.CoverUrl,
+        is_supporter = u.IsSupporter
+    }).ToList();
         
-    return Results.Ok(users);
+    return Results.Ok(mapped);
 });
 
 app.MapGet("/api/v2/friends", (HttpRequest request, AppDbContext db) =>
@@ -977,19 +1071,21 @@ app.MapGet("/api/v2/friends", (HttpRequest request, AppDbContext db) =>
         .Select(r => r.TargetId)
         .ToList();
         
+    var baseUrl = GetBaseUrl(request);
     var friends = db.Users
         .Where(u => friendIds.Contains(u.Id))
-        .Select(u => new {
-            id = u.Id,
-            username = u.Username,
-            avatar_url = u.AvatarUrl,
-            country_code = u.CountryCode,
-            cover_url = u.CoverUrl,
-            is_online = true 
-        })
         .ToList();
 
-    return Results.Ok(friends);
+    var mapped = friends.Select(u => new {
+        id = u.Id,
+        username = u.Username,
+        avatar_url = NormalizeAvatarUrl(u.AvatarUrl, u.Id, baseUrl),
+        country_code = u.CountryCode,
+        cover_url = u.CoverUrl,
+        is_online = true 
+    }).ToList();
+
+    return Results.Ok(mapped);
 });
 
 app.MapPost("/api/v2/friends", async (HttpRequest request, AppDbContext db) =>
@@ -1009,7 +1105,7 @@ app.MapPost("/api/v2/friends", async (HttpRequest request, AppDbContext db) =>
     {
         var body = await new StreamReader(request.Body).ReadToEndAsync();
         var json = JsonNode.Parse(body);
-        int targetId = json["target_id"]?.GetValue<int>() ?? 0;
+        int targetId = json?["target_id"]?.GetValue<int>() ?? 0;
         
         if (targetId == 0 || targetId == userId) return Results.BadRequest();
         
@@ -1079,17 +1175,22 @@ app.MapPut("/api/v2/users/{id}", async (int id, HttpRequest request, AppDbContex
         
         if (json != null)
         {
-            // Allow updating specific fields
-            if (json["cover_url"] != null) user.CoverUrl = json["cover_url"].ToString();
-            
-            // Only update country code if provided and not empty
-            if (json["country_code"] != null) 
-            {
-                string cc = json["country_code"].ToString();
-                if (!string.IsNullOrEmpty(cc))
-                    user.CountryCode = cc;
-            }
-            // Add more fields as needed
+            JsonNode? root = json;
+            if (json["user"] is JsonObject userObject)
+                root = userObject;
+
+            var coverNode = root?["cover_url"] ?? root?["cover"];
+            var countryNode = root?["country_code"];
+            if (countryNode == null && root?["country"] is JsonObject countryObject)
+                countryNode = countryObject["code"];
+
+            var coverUrl = coverNode?.GetValue<string>();
+            if (!string.IsNullOrEmpty(coverUrl))
+                user.CoverUrl = coverUrl;
+
+            var countryCode = countryNode?.GetValue<string>();
+            if (!string.IsNullOrEmpty(countryCode))
+                user.CountryCode = countryCode.ToUpper();
             
             db.SaveChanges();
             return Results.Ok(user);
@@ -1135,11 +1236,10 @@ app.MapGet("/api/v2/notifications", () => Results.Ok(new { notifications = new L
 app.MapGet("/avatars/{id}", (string id, AppDbContext db) => {
     // Check for local file first (if the URL didn't have an extension)
     var extensions = new[] { ".jpg", ".jpeg", ".png", ".gif" };
-    var avatarsDir = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "avatars");
     
     foreach (var ext in extensions)
     {
-        if (File.Exists(Path.Combine(avatarsDir, $"{id}{ext}")))
+        if (File.Exists(Path.Combine(avatarDir, $"{id}{ext}")))
         {
             return Results.Redirect($"/avatars/{id}{ext}");
         }
@@ -1177,9 +1277,11 @@ app.MapGet("/edit_profile", (HttpRequest request, AppDbContext db) => {
     
     string authSection = "";
     if (user != null) {
+        var baseUrl = GetBaseUrl(request);
+        var avatarUrl = NormalizeAvatarUrl(user.AvatarUrl, user.Id, baseUrl);
         authSection = $@"
         <div class='user-info'>
-            <img src='{user.AvatarUrl}' class='avatar-small'>
+            <img src='{avatarUrl}' class='avatar-small'>
             <div>
                 <h2>Hello, {user.Username}!</h2>
                 <p>ID: {user.Id} (Unique Account ID)</p>
@@ -1314,10 +1416,20 @@ app.MapPost("/upload_avatar", async (HttpRequest request, AppDbContext db) => {
     if (userId == 0) return Results.BadRequest("Invalid User ID or Session");
 
     // Save file
-    var avatarsDir = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "avatars");
-    Directory.CreateDirectory(avatarsDir);
+    Directory.CreateDirectory(avatarDir);
     
-    var filePath = Path.Combine(avatarsDir, $"{userId}.jpg");
+    var ext = Path.GetExtension(file.FileName).ToLower();
+    if (string.IsNullOrEmpty(ext) || (ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".gif")) 
+        ext = ".jpg";
+
+    var oldFiles = Directory.GetFiles(avatarDir, $"{userId}.*");
+    foreach (var oldFile in oldFiles)
+    {
+        try { File.Delete(oldFile); } catch {}
+    }
+    
+    var fileName = $"{userId}{ext}";
+    var filePath = Path.Combine(avatarDir, fileName);
     
     using (var stream = new FileStream(filePath, FileMode.Create))
     {
@@ -1328,7 +1440,8 @@ app.MapPost("/upload_avatar", async (HttpRequest request, AppDbContext db) => {
     var user = db.Users.FirstOrDefault(u => u.Id == userId);
     if (user != null)
     {
-        user.AvatarUrl = $"http://localhost:5000/avatars/{userId}.jpg?t={DateTime.UtcNow.Ticks}";
+        var baseUrl = GetBaseUrl(request);
+        user.AvatarUrl = $"{baseUrl}/avatars/{fileName}?t={DateTime.UtcNow.Ticks}";
         db.SaveChanges();
     }
 
@@ -1371,16 +1484,18 @@ app.MapPost("/edit_profile", ([FromForm] string username, [FromForm] string coun
     return Results.Content($"<h1>Profile Updated!</h1><p>Restart the game to see changes.</p><a href='/edit_profile?token={token}&id={user.Id}' style='color: #ff66aa'>Back</a>", "text/html");
 }).DisableAntiforgery();
 
-app.MapGet("/users/{id}", (string id, AppDbContext db) => {
+app.MapGet("/users/{id}", (string id, HttpRequest request, AppDbContext db) => {
     if (int.TryParse(id, out int userId)) {
          var user = db.Users.FirstOrDefault(u => u.Id == userId);
          if (user != null) {
+             var baseUrl = GetBaseUrl(request);
+             var avatarUrl = NormalizeAvatarUrl(user.AvatarUrl, user.Id, baseUrl);
              return Results.Content($@"
              <!DOCTYPE html>
              <html>
              <body>
                  <h1>{user.Username}</h1>
-                 <img src='{user.AvatarUrl}' width='100' />
+                 <img src='{avatarUrl}' width='100' />
                  <p>Country: {user.CountryCode}</p>
                  <a href='/edit_profile'>Edit Profile</a>
              </body>

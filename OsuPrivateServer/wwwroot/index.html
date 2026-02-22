@@ -437,6 +437,29 @@
         // --- State ---
         const API_BASE = window.location.origin;
         let currentUser = null;
+        const cacheToken = Date.now().toString();
+
+        function normalizeUrl(url, fallback) {
+            if (!url) return fallback;
+            if (url.startsWith('http://') || url.startsWith('https://')) return url;
+            if (url.startsWith('/')) return `${API_BASE}${url}`;
+            return `${API_BASE}/${url}`;
+        }
+
+        function withCache(url) {
+            if (!url) return url;
+            return url.includes('?') ? `${url}&t=${cacheToken}` : `${url}?t=${cacheToken}`;
+        }
+
+        function avatarSrc(user) {
+            const fallback = user && user.id ? `${API_BASE}/avatars/${user.id}` : `${API_BASE}/avatars/0`;
+            return withCache(normalizeUrl(user?.avatar_url, fallback));
+        }
+
+        function coverSrc(user) {
+            const fallback = 'https://osu.ppy.sh/images/headers/profile-covers/c1.jpg';
+            return normalizeUrl(user?.cover_url, fallback);
+        }
 
         // --- Init ---
         document.addEventListener('DOMContentLoaded', () => {
@@ -494,7 +517,7 @@
             grid.innerHTML = '<div style="text-align:center; padding: 2rem;">Loading...</div>';
             
             try {
-                const res = await fetch(`${API_BASE}/api/v2/users?q=${encodeURIComponent(query)}`);
+                const res = await fetch(`${API_BASE}/api/v2/users?q=${encodeURIComponent(query)}&limit=100&offset=0`);
                 const users = await res.json();
                 
                 if (users.length === 0) {
@@ -514,14 +537,16 @@
         }
 
         function createUserCard(u) {
+            const avatar = avatarSrc(u);
+            const cover = coverSrc(u);
             return `
                 <div class="card rank-card" onclick="openProfile(${u.id})" style="cursor: pointer;">
-                    <div class="header" style="background-image: url('${u.cover_url || 'https://osu.ppy.sh/images/headers/profile-covers/c1.jpg'}');">
+                    <div class="header" style="background-image: url('${cover}');">
                         <div style="position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.6); padding: 2px 8px; border-radius: 4px;">
                             <i class="fas fa-flag"></i> ${u.country_code}
                         </div>
                     </div>
-                    <img src="${u.avatar_url || 'https://a.ppy.sh/'}" class="avatar">
+                    <img src="${avatar}" class="avatar">
                     <div class="body">
                         <h3>${u.username}</h3>
                         <div style="margin-top: 10px;">
@@ -746,8 +771,8 @@
                     const username = u.user ? u.user.username : 'Unknown';
                     const country = u.user ? u.user.country_code : 'XX';
                     const userId = u.user ? u.user.id : 0;
-                    const avatar = u.user && u.user.avatar_url ? u.user.avatar_url : 'https://a.ppy.sh/';
-                    const cover = u.user && u.user.cover_url ? u.user.cover_url : 'https://osu.ppy.sh/images/headers/profile-covers/c1.jpg';
+                    const avatar = avatarSrc(u.user || { id: userId });
+                    const cover = coverSrc(u.user || {});
                     const rank = u.global_rank || '-';
 
                     html += `
@@ -796,10 +821,12 @@
                 const user = await res.json();
                 
                 const isOwner = currentUser && currentUser.id === user.id;
+                const avatar = avatarSrc(user);
+                const cover = coverSrc(user);
 
                 app.innerHTML = `
-                    <div class="profile-hero fade-in" style="background-image: url('${user.cover_url || 'https://osu.ppy.sh/images/headers/profile-covers/c1.jpg'}')">
-                        <img src="${user.avatar_url || 'https://a.ppy.sh/'}" class="profile-avatar-large">
+                    <div class="profile-hero fade-in" style="background-image: url('${cover}')">
+                        <img src="${avatar}" class="profile-avatar-large">
                         <div class="profile-info">
                             <h1>${user.username}</h1>
                             <div style="font-size: 1.2rem; display: flex; align-items: center; gap: 10px; margin-top: 5px;">
@@ -882,13 +909,17 @@
                 if (avatarFile) {
                     const formData = new FormData();
                     formData.append('avatar', avatarFile);
-                    await fetch(`${API_BASE}/api/v2/users/${currentUser.id}/avatar`, {
+                    const avatarRes = await fetch(`${API_BASE}/api/v2/users/${currentUser.id}/avatar`, {
                         method: 'POST',
                         headers: {
                             'Authorization': `Bearer ${token}`
                         },
                         body: formData
                     });
+                    if (avatarRes.ok) {
+                        const avatarJson = await avatarRes.json();
+                        if (avatarJson?.avatar_url) currentUser.avatar_url = avatarJson.avatar_url;
+                    }
                 }
 
                 alert('Profile updated!');
