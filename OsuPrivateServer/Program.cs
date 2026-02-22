@@ -138,29 +138,29 @@ app.MapPost("/users", (HttpRequest request, AppDbContext db) =>
     string password = form["user[password]"];
 
     if (string.IsNullOrEmpty(user) || string.IsNullOrEmpty(email) || string.IsNullOrEmpty(password))
-            {
-                 return Results.BadRequest(new { 
-                     form_error = new { 
-                         user = new { 
-                             username = string.IsNullOrEmpty(user) ? new[] { "Username required!" } : null,
-                             user_email = string.IsNullOrEmpty(email) ? new[] { "Email required!" } : null,
-                             password = string.IsNullOrEmpty(password) ? new[] { "Password required!" } : null
-                         } 
-                     } 
-                 });
-            }
+    {
+        return Results.BadRequest(new { 
+            form_error = new { 
+                user = new { 
+                    username = string.IsNullOrEmpty(user) ? new[] { "Username required!" } : null,
+                    user_email = string.IsNullOrEmpty(email) ? new[] { "Email required!" } : null,
+                    password = string.IsNullOrEmpty(password) ? new[] { "Password required!" } : null
+                } 
+            } 
+        });
+    }
 
             // Check if user already exists
-            if (db.Users.Any(u => u.Username.ToLower() == user.ToLower()))
-            {
-                return Results.BadRequest(new { 
-                    form_error = new { 
-                        user = new { 
-                            username = new[] { "Username already taken!" } 
-                        } 
-                    } 
-                });
-            }
+    if (db.Users.Any(u => u.Username.ToLower() == user.ToLower()))
+    {
+        return Results.BadRequest(new { 
+            form_error = new { 
+                user = new { 
+                    username = new[] { "Username already taken!" } 
+                } 
+            } 
+        });
+    }
 
     int newId = (db.Users.Max(u => (int?)u.Id) ?? 1000) + 1;
     var newUser = new User
@@ -168,6 +168,7 @@ app.MapPost("/users", (HttpRequest request, AppDbContext db) =>
         Id = newId,
         Username = user,
         CountryCode = "US",
+        AvatarUrl = $"{websiteUrl}/avatars/default", // Set default avatar
         Statistics = new UserStatistics 
         { 
             GlobalRank = newId, 
@@ -747,8 +748,8 @@ app.MapGet("/api/v2/users/{id}/scores/{type}", async (string id, string type, [F
         var user = db.Users.FirstOrDefault(u => u.Id == score.UserId);
         
         // Fetch beatmap info from Nerinyan to populate the card
-        object beatmapInfo = null;
-        object beatmapsetInfo = null;
+        object? beatmapInfo = null;
+        object? beatmapsetInfo = null;
         
         try 
         {
@@ -809,7 +810,8 @@ app.MapGet("/api/v2/users/{id}/scores/{type}", async (string id, string type, [F
                 is_supporter = user.IsSupporter
             },
             beatmap = beatmapInfo,
-            beatmapset = beatmapsetInfo
+            beatmapset = beatmapsetInfo,
+            weight = new { percentage = 100, pp = score.Pp }
         });
     }
 
@@ -824,6 +826,9 @@ app.MapPost("/api/v2/users/{id}/avatar", async (int id, HttpRequest request, App
 
     try
     {
+        // Add null check for token before decoding
+        if (string.IsNullOrEmpty(token)) return Results.Unauthorized();
+        
         var userIdString = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(token));
         if (!int.TryParse(userIdString, out int userId) || userId != id) return Results.Forbid();
     }
@@ -863,8 +868,13 @@ app.MapPost("/api/v2/users/{id}/avatar", async (int id, HttpRequest request, App
     var user = db.Users.FirstOrDefault(u => u.Id == id);
     if (user != null)
     {
-        // Use a timestamp query param to bust client cache
-        user.AvatarUrl = $"{websiteUrl}/avatars/{fileName}?t={DateTime.UtcNow.Ticks}";
+        // Use a relative path so it works in both dev (localhost) and prod (container)
+        // Or construct the full URL based on the incoming request if absolute is needed
+        // For now, let's stick to the websiteUrl environment variable which should be set correctly
+        
+        // Ensure websiteUrl doesn't have a trailing slash if we're adding one
+        var baseUrl = websiteUrl.TrimEnd('/');
+        user.AvatarUrl = $"{baseUrl}/avatars/{fileName}?t={DateTime.UtcNow.Ticks}";
         db.SaveChanges();
     }
 
@@ -999,6 +1009,9 @@ app.MapPut("/api/v2/users/{id}", async (int id, HttpRequest request, AppDbContex
 
     try
     {
+        // Add null check
+        if (string.IsNullOrEmpty(token)) return Results.Unauthorized();
+
         var userIdString = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(token));
         if (!int.TryParse(userIdString, out int userId) || userId != id) return Results.Forbid();
     }
@@ -1016,7 +1029,14 @@ app.MapPut("/api/v2/users/{id}", async (int id, HttpRequest request, AppDbContex
         {
             // Allow updating specific fields
             if (json["cover_url"] != null) user.CoverUrl = json["cover_url"].ToString();
-            if (json["country_code"] != null) user.CountryCode = json["country_code"].ToString();
+            
+            // Only update country code if provided and not empty
+            if (json["country_code"] != null) 
+            {
+                string cc = json["country_code"].ToString();
+                if (!string.IsNullOrEmpty(cc))
+                    user.CountryCode = cc;
+            }
             // Add more fields as needed
             
             db.SaveChanges();
