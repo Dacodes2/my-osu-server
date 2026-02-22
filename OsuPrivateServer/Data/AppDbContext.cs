@@ -9,6 +9,7 @@ public class AppDbContext : DbContext
 
     public DbSet<User> Users { get; set; }
     public DbSet<Score> Scores { get; set; }
+    public DbSet<UserRelation> UserRelations { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -18,5 +19,9 @@ public class AppDbContext : DbContext
                 s.OwnsOne(st => st.Level);
                 s.OwnsOne(st => st.GradeCounts);
             });
+            
+        modelBuilder.Entity<UserRelation>()
+            .HasIndex(ur => new { ur.UserId, ur.TargetId })
+            .IsUnique();
     }
 }

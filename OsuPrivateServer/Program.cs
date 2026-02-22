@@ -280,13 +280,18 @@ app.MapGet("/api/v2/rankings/{mode}/{type}", (string mode, string type, [FromQue
     // Update ranks dynamically before returning
     var users = db.Users
         .Include(u => u.Statistics)
+        .ToList() // Materialize first to avoid EF translation issues with custom logic
+        .Where(u => u.Statistics != null)
         .OrderByDescending(u => u.Statistics.Pp)
         .ToList();
 
     for (int i = 0; i < users.Count; i++)
     {
-        users[i].Statistics.GlobalRank = i + 1;
-        users[i].Statistics.CountryRank = i + 1; // Simplified
+        if (users[i].Statistics != null)
+        {
+            users[i].Statistics.GlobalRank = i + 1;
+            users[i].Statistics.CountryRank = i + 1; // Simplified
+        }
     }
     db.SaveChanges();
 
@@ -305,15 +310,26 @@ app.MapGet("/api/v2/rankings/{mode}/{type}", (string mode, string type, [FromQue
             is_active = u.IsActive,
             is_supporter = u.IsSupporter
         },
-        pp = u.Statistics.Pp,
-        global_rank = u.Statistics.GlobalRank,
-        country_rank = u.Statistics.CountryRank,
-        ranked_score = u.Statistics.RankedScore,
-        hit_accuracy = u.Statistics.HitAccuracy,
-        play_count = u.Statistics.PlayCount,
-        total_score = u.Statistics.TotalScore,
-        level = u.Statistics.Level,
-        grade_counts = u.Statistics.GradeCounts
+        pp = u.Statistics?.Pp ?? 0,
+        global_rank = u.Statistics?.GlobalRank ?? 0,
+        ranked_score = u.Statistics?.RankedScore ?? 0,
+        hit_accuracy = u.Statistics?.HitAccuracy ?? 100,
+        play_count = u.Statistics?.PlayCount ?? 0,
+        play_time = 0, // Placeholder
+        total_score = u.Statistics?.TotalScore ?? 0,
+        level = new 
+        {
+            current = u.Statistics?.Level?.Current ?? 1,
+            progress = u.Statistics?.Level?.Progress ?? 0
+        },
+        grade_counts = new
+        {
+            ssh = u.Statistics?.GradeCounts?.Ssh ?? 0,
+            ss = u.Statistics?.GradeCounts?.Ss ?? 0,
+            sh = u.Statistics?.GradeCounts?.Sh ?? 0,
+            s = u.Statistics?.GradeCounts?.S ?? 0,
+            a = u.Statistics?.GradeCounts?.A ?? 0
+        }
     }).ToList();
 
     // Use 'cursor' for pagination
@@ -813,15 +829,27 @@ app.MapPost("/api/v2/users/{id}/avatar", async (int id, HttpRequest request, App
     if (!request.HasFormContentType) return Results.BadRequest("Expected form content type");
 
     var form = await request.ReadFormAsync();
-    var file = form.Files.GetFile("avatar");
-
+    // Extension check
+    var file = form.Files.GetFile("avatar") ?? form.Files.FirstOrDefault();
     if (file == null || file.Length == 0) return Results.BadRequest("No file uploaded");
+
+    var ext = Path.GetExtension(file.FileName).ToLower();
+    if (string.IsNullOrEmpty(ext) || (ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".gif")) 
+        ext = ".jpg"; // Default to jpg
 
     // Save file
     var avatarsDir = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "avatars");
     Directory.CreateDirectory(avatarsDir);
     
-    var filePath = Path.Combine(avatarsDir, $"{id}.jpg"); // Force jpg for simplicity or detect extension
+    // Delete old avatars
+    var oldFiles = Directory.GetFiles(avatarsDir, $"{id}.*");
+    foreach (var oldFile in oldFiles)
+    {
+        try { File.Delete(oldFile); } catch {}
+    }
+    
+    var fileName = $"{id}{ext}";
+    var filePath = Path.Combine(avatarsDir, fileName);
     
     using (var stream = new FileStream(filePath, FileMode.Create))
     {
@@ -833,15 +861,126 @@ app.MapPost("/api/v2/users/{id}/avatar", async (int id, HttpRequest request, App
     if (user != null)
     {
         // Use a timestamp query param to bust client cache
-        user.AvatarUrl = $"{websiteUrl}/avatars/{id}.jpg?t={DateTime.UtcNow.Ticks}";
+        user.AvatarUrl = $"{websiteUrl}/avatars/{fileName}?t={DateTime.UtcNow.Ticks}";
         db.SaveChanges();
     }
 
     return Results.Ok(new { avatar_url = user?.AvatarUrl });
 });
 
-// Serve static files (avatars)
-app.UseStaticFiles();
+// Friends & Users Endpoints
+app.MapGet("/api/v2/users", (string? q, AppDbContext db) =>
+{
+    if (string.IsNullOrWhiteSpace(q)) return Results.Ok(new List<object>());
+    
+    var users = db.Users
+        .Where(u => u.Username.ToLower().Contains(q.ToLower()))
+        .Take(20)
+        .Select(u => new {
+            id = u.Id,
+            username = u.Username,
+            avatar_url = u.AvatarUrl,
+            country_code = u.CountryCode,
+            cover_url = u.CoverUrl,
+            is_supporter = u.IsSupporter
+        })
+        .ToList();
+        
+    return Results.Ok(users);
+});
+
+app.MapGet("/api/v2/friends", (HttpRequest request, AppDbContext db) =>
+{
+    var token = request.Headers.Authorization.FirstOrDefault()?.Split(" ").Last();
+    if (string.IsNullOrEmpty(token)) return Results.Unauthorized();
+
+    int userId = 0;
+    try
+    {
+        var userIdString = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(token));
+        if (!int.TryParse(userIdString, out userId)) return Results.Unauthorized();
+    }
+    catch { return Results.Unauthorized(); }
+
+    var friendIds = db.UserRelations
+        .Where(r => r.UserId == userId && r.Status == 1)
+        .Select(r => r.TargetId)
+        .ToList();
+        
+    var friends = db.Users
+        .Where(u => friendIds.Contains(u.Id))
+        .Select(u => new {
+            id = u.Id,
+            username = u.Username,
+            avatar_url = u.AvatarUrl,
+            country_code = u.CountryCode,
+            cover_url = u.CoverUrl,
+            is_online = true 
+        })
+        .ToList();
+
+    return Results.Ok(friends);
+});
+
+app.MapPost("/api/v2/friends", async (HttpRequest request, AppDbContext db) =>
+{
+    var token = request.Headers.Authorization.FirstOrDefault()?.Split(" ").Last();
+    if (string.IsNullOrEmpty(token)) return Results.Unauthorized();
+
+    int userId = 0;
+    try
+    {
+        var userIdString = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(token));
+        if (!int.TryParse(userIdString, out userId)) return Results.Unauthorized();
+    }
+    catch { return Results.Unauthorized(); }
+    
+    try 
+    {
+        var body = await new StreamReader(request.Body).ReadToEndAsync();
+        var json = JsonNode.Parse(body);
+        int targetId = json["target_id"]?.GetValue<int>() ?? 0;
+        
+        if (targetId == 0 || targetId == userId) return Results.BadRequest();
+        
+        if (!db.Users.Any(u => u.Id == targetId)) return Results.NotFound();
+        
+        if (!db.UserRelations.Any(r => r.UserId == userId && r.TargetId == targetId))
+        {
+            db.UserRelations.Add(new UserRelation { UserId = userId, TargetId = targetId, Status = 1 });
+            db.SaveChanges();
+        }
+        
+        return Results.Ok();
+    }
+    catch 
+    {
+        return Results.BadRequest();
+    }
+});
+
+app.MapDelete("/api/v2/friends/{targetId}", (int targetId, HttpRequest request, AppDbContext db) =>
+{
+    var token = request.Headers.Authorization.FirstOrDefault()?.Split(" ").Last();
+    if (string.IsNullOrEmpty(token)) return Results.Unauthorized();
+
+    int userId = 0;
+    try
+    {
+        var userIdString = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(token));
+        if (!int.TryParse(userIdString, out userId)) return Results.Unauthorized();
+    }
+    catch { return Results.Unauthorized(); }
+    
+    var relation = db.UserRelations.FirstOrDefault(r => r.UserId == userId && r.TargetId == targetId);
+    if (relation != null)
+    {
+        db.UserRelations.Remove(relation);
+        db.SaveChanges();
+    }
+    
+    return Results.Ok();
+});
 
 // Generic user update
 app.MapPut("/api/v2/users/{id}", async (int id, HttpRequest request, AppDbContext db) =>
