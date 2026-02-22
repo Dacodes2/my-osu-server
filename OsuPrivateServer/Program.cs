@@ -1234,14 +1234,25 @@ app.MapGet("/api/v2/chat/channels", () => Results.Ok(new List<object>()));
 app.MapGet("/api/v2/notifications", () => Results.Ok(new { notifications = new List<object>() }));
 
 app.MapGet("/avatars/{id}", (string id, AppDbContext db) => {
-    // Check for local file first (if the URL didn't have an extension)
     var extensions = new[] { ".jpg", ".jpeg", ".png", ".gif" };
-    
+    var requestedPath = Path.Combine(avatarDir, id);
+    if (File.Exists(requestedPath))
+    {
+        var ext = Path.GetExtension(requestedPath).ToLowerInvariant();
+        var contentType = ext == ".png" ? "image/png"
+            : ext == ".gif" ? "image/gif"
+            : "image/jpeg";
+        return Results.File(requestedPath, contentType);
+    }
     foreach (var ext in extensions)
     {
-        if (File.Exists(Path.Combine(avatarDir, $"{id}{ext}")))
+        var filePath = Path.Combine(avatarDir, $"{id}{ext}");
+        if (File.Exists(filePath))
         {
-            return Results.Redirect($"/avatars/{id}{ext}");
+            var contentType = ext == ".png" ? "image/png"
+                : ext == ".gif" ? "image/gif"
+                : "image/jpeg";
+            return Results.File(filePath, contentType);
         }
     }
 

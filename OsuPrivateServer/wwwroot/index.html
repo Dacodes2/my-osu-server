@@ -151,11 +151,17 @@
         }
 
         /* Rankings */
+        .rank-card {
+            overflow: visible;
+        }
+
         .rank-card .header {
             height: 100px;
             background-size: cover;
             background-position: center;
             position: relative;
+            border-radius: 12px 12px 0 0;
+            overflow: hidden;
         }
 
         .rank-card .avatar {
@@ -518,7 +524,9 @@
             
             try {
                 const res = await fetch(`${API_BASE}/api/v2/users?q=${encodeURIComponent(query)}&limit=100&offset=0`);
-                const users = await res.json();
+                if (!res.ok) throw new Error(`API Error: ${res.status}`);
+                const payload = await res.json();
+                const users = Array.isArray(payload) ? payload : (payload?.users?.data || []);
                 
                 if (users.length === 0) {
                     grid.innerHTML = '<div style="text-align:center; padding: 2rem;">No users found.</div>';
