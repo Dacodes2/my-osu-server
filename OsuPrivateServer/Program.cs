@@ -844,7 +844,7 @@ app.MapPost("/api/v2/users/{id}/avatar", async (int id, HttpRequest request, App
 app.UseStaticFiles();
 
 // Generic user update
-app.MapPut("/api/v2/users/{id}", (int id, HttpRequest request, AppDbContext db) =>
+app.MapPut("/api/v2/users/{id}", async (int id, HttpRequest request, AppDbContext db) =>
 {
     // Check auth
     var token = request.Headers.Authorization.FirstOrDefault()?.Split(" ").Last();
@@ -857,30 +857,28 @@ app.MapPut("/api/v2/users/{id}", (int id, HttpRequest request, AppDbContext db) 
     }
     catch { return Results.Unauthorized(); }
 
-    // Read JSON body - simplified
-    // In real app we should use [FromBody] UserUpdateRequest model
-    // Here we'll just check for form data or json.
-    // For simplicity, let's assume we might receive form data or we can parse JSON manually if needed.
-    // But standard ASP.NET Core minimal API with [FromBody] is better if we have a model.
-    // Let's stick to a simple form approach or query params for now if client sends them, 
-    // OR just use the edit_profile logic but exposed as JSON API.
+    var user = db.Users.FirstOrDefault(u => u.Id == id);
+    if (user == null) return Results.NotFound();
 
-    // Let's assume the client sends JSON.
-    // We need to read the body.
-    
-    // Quick hack: The user wants to change country.
-    // Let's try to read it from a custom header or query param for easiest integration
-    // OR let's just use the existing form logic if we can.
-    
-    // Better: Read the request body as a JsonDocument
-    /*
-    using var reader = new StreamReader(request.Body);
-    var body = await reader.ReadToEndAsync();
-    var json = JsonDocument.Parse(body);
-    */
-    
-    // For now, let's return OK to avoid errors if client calls this.
-    return Results.Ok();
+    try 
+    {
+        var body = await new StreamReader(request.Body).ReadToEndAsync();
+        var json = JsonNode.Parse(body);
+        
+        if (json != null)
+        {
+            // Allow updating specific fields
+            if (json["cover_url"] != null) user.CoverUrl = json["cover_url"].ToString();
+            if (json["country_code"] != null) user.CountryCode = json["country_code"].ToString();
+            // Add more fields as needed
+            
+            db.SaveChanges();
+            return Results.Ok(user);
+        }
+    }
+    catch {}
+
+    return Results.BadRequest();
 });
 
 // Specific endpoint for our custom UI to call
