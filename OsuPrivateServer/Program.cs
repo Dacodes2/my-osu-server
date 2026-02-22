@@ -275,8 +275,11 @@ app.MapGet("/api/v2/users/{id}/{mode}", (string id, string mode, AppDbContext db
 });
 
 // Leaderboards
-app.MapGet("/api/v2/rankings/{mode}/{type}", (string mode, string type, [FromQuery] int page, AppDbContext db) =>
+app.MapGet("/api/v2/rankings/{mode}/{type}", (string mode, string type, [FromQuery] int page = 1, AppDbContext db) =>
 {
+    // Ensure page is valid
+    if (page < 1) page = 1;
+
     // Update ranks dynamically before returning
     var users = db.Users
         .Include(u => u.Statistics)
@@ -871,10 +874,15 @@ app.MapPost("/api/v2/users/{id}/avatar", async (int id, HttpRequest request, App
 // Friends & Users Endpoints
 app.MapGet("/api/v2/users", (string? q, AppDbContext db) =>
 {
-    if (string.IsNullOrWhiteSpace(q)) return Results.Ok(new List<object>());
-    
-    var users = db.Users
-        .Where(u => u.Username.ToLower().Contains(q.ToLower()))
+    var query = db.Users.AsQueryable();
+
+    if (!string.IsNullOrWhiteSpace(q))
+    {
+        query = query.Where(u => u.Username.ToLower().Contains(q.ToLower()));
+    }
+
+    var users = query
+        .OrderByDescending(u => u.Statistics.Pp) // Show top players by default
         .Take(20)
         .Select(u => new {
             id = u.Id,
